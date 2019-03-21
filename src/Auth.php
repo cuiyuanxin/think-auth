@@ -73,32 +73,50 @@ use think\facade\Config;
 use think\Db;
 
 class Auth {
-
-	// 默认权限配置
-	protected $_config = [
-		'auth_on' => true, // 认证开关
+    
+    // 设置实例化变量
+    private static $instance = null;
+    
+    private $request;
+    
+    // 默认权限配置
+    protected $_config = [
+        'auth_on' => true, // 认证开关
         'auth_type' => 1, // 认证方式，1为实时认证；2为登录认证。
         'auth_group' => 'auth_group', // 用户组数据表名
         'auth_group_access' => 'auth_group_access', // 用户-用户组关系表
         'auth_rule' => 'auth_rule', // 权限规则表
-        'auth_user' => 'user'             // 用户信息表
-	];
+        'auth_user' => 'user' // 用户信息表     
+    ];
 
-	// 初始化判断权限配置是否存在
-	public function __construct() {
-		if($auth = Config::get('auth.auth')) {
-			// 存在合并数组
-			$this->_config = array_merge($this->_config, $auth);
-		}
-	}
+    // 初始化判断权限配置是否存在
+    private function __construct() {
+        if($auth = Config::get('auth.auth')) {
+            // 存在合并数组
+            $this->_config = array_merge($this->_config, $auth);
+        }
+        $this->request = Request::instance();
+    }
+    
+    /**
+    * 公有静态方法
+    * 判断$instance是否实例化，存在实例化对象就直接返回，不存在实例化对象就new实例化
+    */
+    static public function instance() {
+        if(is_null(self::$instance)) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
 
-	/**
-     * 检查权限
-     * @param name string|array  需要验证的规则列表,支持逗号分隔的权限规则或索引数组
-     * @param uid  int           认证用户的id
-     * @param string mode        执行check的模式
-     * @param relation string    如果为 'or' 表示满足任一条规则即通过验证;如果为 'and'则表示需满足所有规则才能通过验证
-     * @return boolean           通过验证返回true;失败返回false
+    /**
+     * 
+     * @param type $name string|array  需要验证的规则列表,支持逗号分隔的权限规则或索引数组
+     * @param type $uid int           认证用户的id
+     * @param type $type
+     * @param type $mode string        执行check的模式
+     * @param type $relation string    如果为 'or' 表示满足任一条规则即通过验证;如果为 'and'则表示需满足所有规则才能通过验证
+     * @return boolean 通过验证返回true;失败返回false
      */
     public function check($name, $uid, $type = 1, $mode = 'url', $relation = 'or') {
         if (!$this->_config['auth_on'])
@@ -114,7 +132,7 @@ class Auth {
         }
         $list = []; //保存验证通过的规则名
         if ($mode == 'url') {
-            $REQUEST = unserialize(strtolower(serialize(Request::param())));
+            $REQUEST = unserialize(strtolower(serialize($this->request->param())));
         }
         foreach ($authList as $auth) {
             $query = preg_replace('/^.+\?/U', '', $auth);
@@ -129,11 +147,11 @@ class Auth {
                 $list[] = $auth;
             }
         }
-        if ($relation == 'or' and ! empty($list)) {
+        if ($relation == 'or' && !empty($list)) {
             return true;
         }
         $diff = array_diff($name, $list);
-        if ($relation == 'and' and empty($diff)) {
+        if ($relation == 'and' && empty($diff)) {
             return true;
         }
         return false;
@@ -141,8 +159,9 @@ class Auth {
 
     /**
      * 根据用户id获取用户组,返回值为数组
-     * @param  uid int     用户id
-     * @return array       用户所属的用户组 array(
+     * @staticvar array $groups
+     * @param type $uid 用户id
+     * @return array 用户所属的用户组 array(
      *     array('uid'=>'用户id','group_id'=>'用户组id','title'=>'用户组名称','rules'=>'用户组拥有的规则id,多个,号隔开'),
      *     ...)   
      */
@@ -150,10 +169,12 @@ class Auth {
         static $groups = [];
         if (isset($groups[$uid]))
             return $groups[$uid];
-        $user_groups = Db::name($this->_config['auth_group_access'] . ' a')
-                        ->where("a.uid='$uid' and g.status='1'")
-                        ->join(Config::get('database.prefix') . "{$this->_config['auth_group']} g", " a.group_id = g.id")
-                        ->field('uid,group_id,title,rules')->select();
+        $user_groups = Db::name($this->_config['auth_group_access'])
+                ->alias('aga')
+                ->join([Config::get('database.prefix') . $this->_config['auth_group'] => 'ag'], 'aga.group_id = ag.id')
+                ->where(['aga.uid' => $uid, 'ag.status' => 1])
+                ->field('aga.uid, aga.group_id, ag.title, ag.rules')
+                ->select();
         $groups[$uid] = $user_groups ?: [];
         return $groups[$uid];
     }
@@ -184,24 +205,27 @@ class Auth {
             return [];
         }
         $map = [
-            'status' => 1,
-            'inspect' => 1,
+            'status' => [0, 1],
+            'id' => $ids
         ];
         //读取用户组所有权限规则
-        $rules = Db::name($this->_config['auth_rule'])->where($map)->whereIn('id', $ids)->field('condition, module, url')->select();
+        $rules = Db::name($this->_config['auth_rule'])
+                ->where($map)
+                ->field('url, condition')
+                ->select();
         //循环规则，判断结果。
-        $authList = [];   //
+        $authList = [];
         foreach ($rules as $rule) {
             if (!empty($rule['condition'])) { //根据condition进行验证
                 $user = $this->getUserInfo($uid); //获取用户信息,一维数组
                 $command = preg_replace('/\{(\w*?)\}/', '$user[\'\\1\']', $rule['condition']);
                 @(eval('$condition=(' . $command . ');'));
                 if ($condition) {
-                    $authList[] = strtolower($rule['module'] . '/' . $rule['url']);
+                    $authList[] = strtolower($rule['url']);
                 }
             } else {
                 //只要存在就记录
-                $authList[] = strtolower($rule['module'] . '/' . $rule['url']);
+                $authList[] = strtolower($rule['url']);
             }
         }
         $_authList[$uid . $t] = $authList;
@@ -218,7 +242,9 @@ class Auth {
     protected function getUserInfo($uid) {
         static $userinfo = [];
         if (!isset($userinfo[$uid])) {
-            $userinfo[$uid] = Db::name($this->_config['auth_user'])->where(['id' => $uid, 'status' => 1])->find();
+            $userinfo[$uid] = Db::name($this->_config['auth_user'])
+                    ->where(['id' => $uid, 'status' => 1])
+                    ->find();
         }
         return $userinfo[$uid];
     }
